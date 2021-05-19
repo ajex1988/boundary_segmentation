@@ -4,6 +4,7 @@ import glob
 import cv2
 import numpy as np
 import json
+from pycocotools import mask
 import shutil
 
 def filename_img2mask(img_name):
@@ -168,7 +169,7 @@ def task_2():
     img_cnt = 0
     p_folder = '/home/data/duke_liver'
     input_dataset_folder = os.path.join(p_folder,'dataset')
-    modalities = [os.path.basename(n) for n in glob.glob(input_dataset_folder+"/imgs/*")]
+    modalities = [os.path.basename(n) for n in glob.glob(input_dataset_folder+"/img/*")]
 
     output_folder = '/home/data/duke_liver/duke_liver_coco'
     annotation_output_folder = os.path.join(output_folder,'annotations')
@@ -189,7 +190,7 @@ def task_2():
         if not os.path.exists(imgs_output_dir):
             os.makedirs(imgs_output_dir)
 
-        modality_dir = os.path.join(input_dataset_folder,"imgs",modality)
+        modality_dir = os.path.join(input_dataset_folder,"img",modality)
         exam_dir_list = glob.glob(modality_dir+"/*")
 
         for exam_dir in exam_dir_list:
@@ -205,8 +206,8 @@ def task_2():
                 shutil.copy(img_file,new_img_file)
 
                 mask_file = os.path.join(mask_dir,img_name)
-                mask = cv2.imread(mask_file,cv2.IMREAD_GRAYSCALE)
-                height, width = mask.shape[0], mask.shape[1]
+                bimask = cv2.imread(mask_file,cv2.IMREAD_GRAYSCALE)
+                height, width = bimask.shape[0], bimask.shape[1]
 
                 image_dict = {
                     "file_name": new_img_name,
@@ -216,9 +217,32 @@ def task_2():
                 }
                 json_dict["images"].append(image_dict)
 
-                mask /= 255
+                bimask = bimask / 255
+                bimask = np.expand_dims(bimask, axis=2)
+                bimask = bimask.astype('uint8')
+                bimask = np.asfortranarray(bimask)
+                Rs = mask.encode(bimask)
+                assert len(Rs) == 1
+                Rs = Rs[0]
+                area = mask.area(Rs)
+                bbox = mask.toBbox(Rs)
+                annotation_dict = {}
+                annotation_dict['image_id'] = new_img_id
+                annotation_dict['category_id'] = category_dict[modality]
+                annotation_dict['segmentation'] = Rs
+                annotation_dict['iscrowd'] = 1
+                annotation_dict['area'] = area
+                annotation_dict['bbox'] = bbox
 
-                area = np.sum(mask)
+                json_dict['annotations'].append(annotation_dict)
+        with open(output_json_file,'w') as writer:
+            json_str = json.dumps(json_dict)
+            writer.write(json_str)
+        print(f"{modality} Done")
+    print("All Done")
+
+
+
 
 
 
