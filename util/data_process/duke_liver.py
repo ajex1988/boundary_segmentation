@@ -7,6 +7,7 @@ import json
 from pycocotools import mask
 import shutil
 from itertools import groupby
+from skimage import measure
 
 def filename_img2mask(img_name):
     mask_name = img_name[:-12]+'.nii.gz'
@@ -36,6 +37,65 @@ def binary_mask_to_rle(binary_mask):
         counts.append(len(list(elements)))
 
     return rle
+
+def close_contour(contour):
+    if not np.array_equal(contour[0], contour[-1]):
+        contour = np.vstack((contour, contour[0]))
+    return contour
+
+
+def binary_mask_to_polygon(binary_mask, tolerance=0):
+    """Converts a binary mask to COCO polygon representation
+    Args:
+        binary_mask: a 2D binary numpy array where '1's represent the object
+        tolerance: Maximum distance from original points of polygon to approximated
+            polygonal chain. If tolerance is 0, the original coordinate array is returned.
+    """
+    polygons = []
+    # pad mask to close contours of shapes which start and end at an edge
+    padded_binary_mask = np.pad(binary_mask, pad_width=1, mode='constant', constant_values=0)
+    contours = measure.find_contours(padded_binary_mask, 0.5)
+    contours = np.subtract(contours, 1)
+    for contour in contours:
+        contour = close_contour(contour)
+        contour = measure.approximate_polygon(contour, tolerance)
+        if len(contour) < 3:
+            continue
+        contour = np.flip(contour, axis=1)
+        segmentation = contour.ravel().tolist()
+        # after padding and subtracting 1 we may get -0.5 points in our segmentation
+        segmentation = [0 if i < 0 else i for i in segmentation]
+        polygons.append(segmentation)
+
+    return polygons
+
+
+def blend(img, mask, alpha):
+    blended = np.copy(img)
+    h, w, nc = mask.shape
+    for i in range(h):
+        for j in range(w):
+            if (mask[i,j,0]!=0):
+                blended[i,j] = img[i,j]*alpha+np.array([0,0,255])*(1-alpha)
+    return blended
+
+def draw_save_gt(img_dir, mask_dir, output_dir):
+    '''
+    Draw gt and save the img
+    '''
+    img_file_list = glob.glob(img_dir+"/*")
+    for img_file in img_file_list:
+        img_name = os.path.basename(img_file)
+        name_list = img_name.split('_')
+        vol_dir = img_name[len(name_list[0])+1:-len(name_list[-1])-1]
+        mask_file = os.path.join(mask_dir,vol_dir,img_name[-8:])
+        output_file = os.path.join(output_dir,img_name)
+
+        img = cv2.imread(img_file)
+        mask = cv2.imread(mask_file)
+        blended = blend(img,mask,0.5)
+
+        cv2.imwrite(output_file,blended)
 
 
 def test_1():
@@ -174,7 +234,7 @@ def get_category_map():
 
 def task_2():
     '''
-    Convert the dataset processed in step 1 into coco format
+    Convert the dataset processed in step 1 into coco format, RLE format, iscrowd = 1
     Zhe Zhu, 20210517
     '''
     print("Task 2, convert to coco format")
@@ -190,7 +250,8 @@ def task_2():
     annotation_output_folder = os.path.join(output_folder,'annotations')
     img_output_folder = os.path.join(output_folder,'imgs')
 
-    category_map = get_category_map()
+    #category_map = get_category_map()
+    emp_cnt = 0
     category_list = [{"supercategory": "liver",
                       "name": "liver",
                       "id": 1}]
@@ -219,21 +280,12 @@ def task_2():
                 img_name = os.path.basename(img_file)
                 new_img_name = f"{modality}_{exam_id}_{img_name}"
                 new_img_id = img_id_start + img_cnt
-                img_cnt += 1
-                new_img_file = os.path.join(imgs_output_dir,new_img_name)
-                shutil.copy(img_file,new_img_file)
 
                 mask_file = os.path.join(mask_dir,img_name)
                 bimask = cv2.imread(mask_file,cv2.IMREAD_GRAYSCALE)
                 height, width = bimask.shape[0], bimask.shape[1]
 
-                image_dict = {
-                    "file_name": new_img_name,
-                    "height": height,
-                    "width": width,
-                    "id": new_img_id,
-                }
-                json_dict["images"].append(image_dict)
+
 
                 bimask = bimask / 255
                 bimask = np.expand_dims(bimask, axis=2)
@@ -243,6 +295,9 @@ def task_2():
                 assert len(Rs) == 1
                 Rs = Rs[0]
                 area = int(mask.area(Rs))
+                if area == 0:
+                    emp_cnt += 1
+                    continue  # skip the "empty" image
                 bbox = mask.toBbox(Rs).tolist()
 
                 rle = binary_mask_to_rle(bimask[:,:,0])
@@ -258,9 +313,22 @@ def task_2():
                 annotation_dict['bbox'] = bbox
 
                 json_dict['annotations'].append(annotation_dict)
+
+
+                img_cnt += 1
+                new_img_file = os.path.join(imgs_output_dir, new_img_name)
+                shutil.copy(img_file, new_img_file)
+                image_dict = {
+                    "file_name": new_img_name,
+                    "height": height,
+                    "width": width,
+                    "id": new_img_id,
+                }
+                json_dict["images"].append(image_dict)
         with open(output_json_file,'w') as writer:
             json.dump(json_dict,writer)
         print(f"{modality} Done")
+    print(f"{emp_cnt} images skipped")
     print("All Done")
 
 
@@ -362,14 +430,172 @@ def task_4():
     print("All Done")
 
 
+def task_5():
+    '''
+    Convert the dataset to coco format using polygons and iscrowd = 0
+    In order to use it in the polar_mask project
+    '''
+    print("Task 5, convert to coco format")
+    img_id_start = 100000
+    img_cnt = 0
+    ann_id_start = 500000
+    ann_cnt = 0
+    p_folder = '/home/data/duke_liver'
+    input_dataset_folder = os.path.join(p_folder, 'dataset')
+    modalities = [os.path.basename(n) for n in glob.glob(input_dataset_folder + "/img/*")]
+
+    output_folder = '/home/data/duke_liver/duke_liver_coco'
+    annotation_output_folder = os.path.join(output_folder, 'annotations')
+    img_output_folder = os.path.join(output_folder, 'imgs')
+
+    # category_map = get_category_map()
+    emp_cnt = 0
+    category_list = [{"supercategory": "liver",
+                      "name": "liver",
+                      "id": 1}]
+
+    for modality in modalities:
+        json_dict = {"images": [],
+                     "info": "Duke liver segmentation dataset",
+                     "license": "Duke internal use only",
+                     "annotations": [],
+                     "categories": category_list}
+        output_json_file = os.path.join(annotation_output_folder, f"{modality}.json")
+
+        imgs_output_dir = os.path.join(img_output_folder, modality)
+        if not os.path.exists(imgs_output_dir):
+            os.makedirs(imgs_output_dir)
+
+        modality_dir = os.path.join(input_dataset_folder, "img", modality)
+        exam_dir_list = glob.glob(modality_dir + "/*")
+
+        for exam_dir in exam_dir_list:
+            exam_id = os.path.basename(exam_dir)
+            mask_dir = os.path.join(input_dataset_folder, "mask", modality, exam_id)
+            img_file_list = glob.glob(exam_dir + "/*")
+            for img_file in img_file_list:
+                img_name = os.path.basename(img_file)
+                new_img_name = f"{modality}_{exam_id}_{img_name}"
+                new_img_id = img_id_start + img_cnt
+
+                mask_file = os.path.join(mask_dir, img_name)
+                bimask = cv2.imread(mask_file, cv2.IMREAD_GRAYSCALE)
+                height, width = bimask.shape[0], bimask.shape[1]
+
+                bimask = bimask / 255
+                bimask = np.expand_dims(bimask, axis=2)
+                bimask = bimask.astype('uint8')
+                bimask = np.asfortranarray(bimask)
+                Rs = mask.encode(bimask)
+                assert len(Rs) == 1
+                Rs = Rs[0]
+                area = int(mask.area(Rs))
+                if area == 0:
+                    emp_cnt += 1
+                    continue  # skip the "empty" image
+                bbox = mask.toBbox(Rs).tolist()
+
+                segmentation = binary_mask_to_polygon(binary_mask=bimask[:,:,0], tolerance=0)
+                ann_id = ann_id_start + ann_cnt
+                ann_cnt += 1
+                annotation_dict = {}
+                annotation_dict['image_id'] = new_img_id
+                annotation_dict['category_id'] = 1  # category_map[modality]
+                annotation_dict['segmentation'] = segmentation
+                annotation_dict['iscrowd'] = 0
+                annotation_dict['id'] = ann_id
+                annotation_dict['area'] = area
+                annotation_dict['bbox'] = bbox
+
+                json_dict['annotations'].append(annotation_dict)
+
+                img_cnt += 1
+                new_img_file = os.path.join(imgs_output_dir, new_img_name)
+                shutil.copy(img_file, new_img_file)
+                image_dict = {
+                    "file_name": new_img_name,
+                    "height": height,
+                    "width": width,
+                    "id": new_img_id,
+                }
+                json_dict["images"].append(image_dict)
+        with open(output_json_file, 'w') as writer:
+            json.dump(json_dict, writer)
+        print(f"{modality} Done")
+    print(f"{emp_cnt} images skipped")
+    print("All Done")
 
 
+def task_6():
+    '''
+    Draw & save gt segmentation
+    '''
+    print("Task 6, draw & save gt")
+    img_dir = '/home/data/duke_liver/duke_liver_coco/train_val/t1nfs_val'
+    mask_dir = '/home/data/duke_liver/dataset/mask/t1nfs'
+    output_dir = '/home/data/duke_liver/dataset/gt_draw/t1nfs_val'
+
+    if not os.path.exists(output_dir):
+        os.makedirs(output_dir)
+    draw_save_gt(img_dir,mask_dir,output_dir)
+    print("Done")
 
 
+def task_7():
+    '''
+    Draw & save gt for all the series
+    '''
+    print("Task 7, draw & save gt for all the series")
+    series_list = [os.path.basename(name) for name in glob.glob('/home/data/duke_liver/dataset/img/*')]
+    img_dir_p = '/home/data/duke_liver/duke_liver_coco/train_val'
+    mask_dir_p = '/home/data/duke_liver/dataset/mask'
+    output_dir_p = '/home/data/duke_liver/dataset/gt_draw'
+
+    for series_type in series_list:
+        img_dir = os.path.join(img_dir_p,series_type+"_val")
+        mask_dir = os.path.join(mask_dir_p,series_type)
+        output_dir = os.path.join(output_dir_p,series_type+"_val")
+
+        if not os.path.exists(output_dir):
+            os.makedirs(output_dir)
+        draw_save_gt(img_dir, mask_dir, output_dir)
+        print(f"{series_type} Done")
+
+
+def task_8():
+    '''
+    Draw & save the average face for each series type
+    '''
+    img_dir = '/home/data/duke_liver/dataset/img'
+    output_dir = '/home/data/duke_liver/dataset/average_img'
+
+    series_list = [os.path.basename(d) for d in glob.glob(img_dir+"/*")]
+
+    for series_name in series_list:
+        series_dir = os.path.join(img_dir,series_name)
+        vol_list = glob.glob(series_dir+"/*")
+        img_sum = np.zeros((512,512),dtype=float)
+        img_cnt = 0
+        for vol_dir in vol_list:
+            img_file_list = glob.glob(vol_dir+"/*")
+            for img_file in img_file_list:
+                img = cv2.imread(img_file,cv2.IMREAD_GRAYSCALE)
+                img = cv2.resize(img,(512,512))
+                img_sum += img
+                img_cnt += 1
+        print(f"{series_name} has {img_cnt} slices")
+        output_file = os.path.join(output_dir,f"{series_name}.png")
+        img_avg = img_sum/img_cnt
+        img_avg.astype(np.uint8)
+        cv2.imwrite(output_file,img_avg)
 
 
 if __name__ == "__main__":
     #task_1()
     #task_2()
     #task_3()
-    task_4()
+    #task_4()
+    #task_5()
+    #task_6()
+    #task_7()
+    task_8()
