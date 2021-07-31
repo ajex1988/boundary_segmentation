@@ -559,6 +559,14 @@ def task_7():
         if not os.path.exists(output_dir):
             os.makedirs(output_dir)
         draw_save_gt(img_dir, mask_dir, output_dir)
+
+        img_dir = os.path.join(img_dir_p, series_type + "_train")
+        mask_dir = os.path.join(mask_dir_p, series_type)
+        output_dir = os.path.join(output_dir_p, series_type + "_train")
+
+        if not os.path.exists(output_dir):
+            os.makedirs(output_dir)
+        draw_save_gt(img_dir, mask_dir, output_dir)
         print(f"{series_type} Done")
 
 
@@ -589,6 +597,83 @@ def task_8():
         img_avg.astype(np.uint8)
         cv2.imwrite(output_file,img_avg)
 
+def task_9():
+    '''
+    Merge coco annotation file and extracted coordinates
+    2021/07/13
+    '''
+    print("Task 9, generating dataset for pytorch...")
+    src_anno_dir = '/home/data/duke_liver/duke_liver_coco/annotations_train_val'
+    bdry_pts_dir = '/home/data/duke_liver/dataset/experiment/bdry_pts/16/pts'
+    tgt_anno_dir = '/home/data/duke_liver/dataset/fmt/annotation_16pts'
+
+    bdry_map = {}
+    bdry_pts_file_list = glob.glob(bdry_pts_dir+"/*")
+    for bdry_pts_file in bdry_pts_file_list:
+        img_id = os.path.basename(bdry_pts_file)[:-5]
+        bdry_map[img_id] = 1
+
+    src_anno_file_list = glob.glob(src_anno_dir+"/*")
+    for src_anno_file in src_anno_file_list:
+        anno_file_name = os.path.basename(src_anno_file)
+        tgt_anno_file = os.path.join(tgt_anno_dir,anno_file_name)
+
+        with open(src_anno_file,'r') as f:
+            src_anno = json.load(f)
+        info_list = src_anno["images"]
+        tgt_anno = {"annotations":[]}
+
+        for info in info_list:
+            img_name = info["file_name"]
+            if img_name[:-4] in bdry_map:
+                coordinates_file_name = img_name[:-4]+".json"
+                coordinates_file = os.path.join(bdry_pts_dir,coordinates_file_name)
+                with open(coordinates_file,'r') as f:
+                    coordinates = json.load(f)
+                info["coordinates"] = coordinates["coordinates"]
+                tgt_anno["annotations"].append(info)
+        with open(tgt_anno_file, 'w', encoding='utf-8') as f:
+            json.dump(tgt_anno, f, ensure_ascii=False, indent=4)
+
+    print("Done")
+
+
+def task_10():
+    '''
+    Select a subset that only contains 1 region of interest
+    '''
+    anno_dir_src = "/home/data/duke_liver/dataset/fmt/annotation_16pts"
+    anno_dir_tgt = "/home/data/duke_liver/dataset/fmt/annotation_16pts_single_obj"
+
+    anno_file_list_src = glob.glob(anno_dir_src+"/*")
+    for anno_file_src in anno_file_list_src:
+        anno_file_name = os.path.basename(anno_file_src)
+        print(f"Processing {anno_file_name}")
+
+        anno_file_tgt = os.path.join(anno_dir_tgt,anno_file_name)
+        with open(anno_file_src,'r') as f:
+            anno_dict_src = json.load(f)
+        anno_dict_tgt = {"annotations": []}
+
+        src_len = len(anno_dict_src["annotations"])
+        print(f"Before filtering there are {src_len} slices")
+        for anno_src in anno_dict_src["annotations"]:
+            if len(anno_src["coordinates"]) == 1:
+                anno_dict_tgt["annotations"].append(anno_src)
+
+        tgt_len = len(anno_dict_tgt["annotations"])
+        print(f"After filtering there are {tgt_len} slices")
+
+        with open(anno_file_tgt,'w',encoding='utf-8') as f:
+            json.dump(anno_dict_tgt,f,ensure_ascii=False,indent=4)
+
+        print(f"{anno_file_name} finished")
+
+    print("Done")
+
+
+
+
 
 if __name__ == "__main__":
     #task_1()
@@ -598,4 +683,6 @@ if __name__ == "__main__":
     #task_5()
     #task_6()
     #task_7()
-    task_8()
+    #task_8()
+    #task_9()
+    task_10()
